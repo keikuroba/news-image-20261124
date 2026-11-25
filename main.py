@@ -86,13 +86,46 @@ def read_header(chunks):
     return width, height, depth, colour
 
 
+def scanline_bytes(width, depth, colour):
+    """Pixel bytes in one image row, derived from the header fields.
+
+    Channels follow the colour type; samples under 8 bits pack several
+    pixels into one byte.
+    """
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[colour]
+    bits = width * channels * depth
+    return (bits + 7) // 8
+
+
+def verify_idat(chunks, width, height, depth, colour):
+    """Inflate the concatenated IDAT payload and check its length.
+
+    Every row carries one filter byte before its pixel bytes, so the
+    inflated stream must hold exactly height * (1 + scanline_bytes).
+    A short or padded IDAT inflates to the wrong length even when its
+    CRCs are intact, and a garbled payload fails to inflate at all.
+    """
+    payload = b"".join(c.data for c in chunks if c.kind == b"IDAT")
+    if not payload:
+        raise PngError("no IDAT chunk found")
+    try:
+        raw = zlib.decompress(payload)
+    except zlib.error as err:
+        raise PngError("IDAT payload does not inflate: %s" % err)
+    want = height * (1 + scanline_bytes(width, depth, colour))
+    if len(raw) != want:
+        raise PngError("inflated IDAT is %d bytes, header needs %d"
+                       % (len(raw), want))
+
+
 def main():
     with open(INPUT_PATH, "rb") as handle:
         blob = handle.read()
     if len(blob) > MAX_FILE_BYTES:
         raise PngError("entry.png is %d bytes, over the 1 MiB cap"
                        % len(blob))
-    (width, height, depth, colour), _chunks = parse_png(blob)
+    (width, height, depth, colour), chunks = parse_png(blob)
+    verify_idat(chunks, width, height, depth, colour)
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     with open(OUTPUT_PATH, "wb") as handle:
         handle.write(blob)
