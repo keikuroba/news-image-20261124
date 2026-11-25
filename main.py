@@ -78,7 +78,42 @@ def check_header(payload):
         raise BadPng("unsupported bit depth: %d" % depth)
     if colour not in (0, 2, 3, 4, 6):
         raise BadPng("unsupported colour type: %d" % colour)
-    return width, height
+    return width, height, depth, colour
+
+
+def expected_raw_size(width, height, depth, colour):
+    """Bytes the inflated IDAT stream must hold for this header.
+
+    Each scanline is one filter byte plus the pixel data; the number
+    of channels follows the colour type, and samples below 8 bits
+    pack several pixels per byte.
+    """
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[colour]
+    bits_per_row = width * channels * depth
+    bytes_per_row = (bits_per_row + 7) // 8
+    return height * (1 + bytes_per_row)
+
+
+def check_pixel_data(blob, width, height, depth, colour):
+    """Inflate the IDAT stream and confirm it matches the header.
+
+    A truncated or padded IDAT section inflates to the wrong length,
+    which the CRC walk alone cannot catch.
+    """
+    raw = b""
+    for kind, payload in read_chunks(blob):
+        if kind == b"IDAT":
+            raw += payload
+    if not raw:
+        raise BadPng("no IDAT chunk")
+    try:
+        pixels = zlib.decompress(raw)
+    except zlib.error as exc:
+        raise BadPng("IDAT does not inflate: %s" % exc)
+    want = expected_raw_size(width, height, depth, colour)
+    if len(pixels) != want:
+        raise BadPng("inflated IDAT is %d bytes, header promises %d"
+                     % (len(pixels), want))
 
 
 def main():
@@ -86,10 +121,11 @@ def main():
         blob = handle.read()
     if len(blob) > MAX_BYTES:
         raise BadPng("image exceeds 1 MiB")
-    width = height = None
+    width = height = depth = colour = None
     for kind, payload in read_chunks(blob):
         if kind == b"IHDR":
-            width, height = check_header(payload)
+            width, height, depth, colour = check_header(payload)
+    check_pixel_data(blob, width, height, depth, colour)
     os.makedirs(os.path.dirname(DEST), exist_ok=True)
     with open(DEST, "wb") as handle:
         handle.write(blob)
